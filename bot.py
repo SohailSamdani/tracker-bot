@@ -60,11 +60,17 @@ Rules:
         }
     }
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+   url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
 
-    async with httpx.AsyncClient(timeout=60) as client:
+import asyncio
+async with httpx.AsyncClient(timeout=60) as client:
+    for attempt in range(3):
         response = await client.post(url, json=payload)
+        if response.status_code == 429:
+            await asyncio.sleep(10)
+            continue
         response.raise_for_status()
+        break
         data = response.json()
         text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
         logger.info(f"Gemini response: {text[:300]}")
