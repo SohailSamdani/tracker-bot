@@ -1,23 +1,82 @@
 import os
 import re
+import json
 import logging
+import httpx
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-import pytesseract
-from PIL import Image
-import io
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+import base64
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN", "")
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 EXCEL_FILE = "tracker_log.xlsx"
 
-# ── Excel helpers ────────────────────────────────────────────────────────────
+# ── Claude Vision ─────────────────────────────────────────────────────────────
+
+async def extract_nodes_with_claude(image_bytes: bytes) -> list:
+    b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
+
+    prompt = """This is a screenshot from GeniusVision solar tracker software.
+Extract all rows from the table and return ONLY a JSON array like this:
+[{"node_id": "30C8", "master": "Master 20"}, ...]
+
+Rules:
+- node_id is the 4-character hex value in the Node ID column
+- master is the value in the Master column e.g. "Master 20"
+- Return ONLY the JSON array, no explanation, no markdown"""
+
+    payload = {
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 2000,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": b64
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    }
+
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json=payload
+        )
+        response.raise_for_status()
+        data = response.json()
+        text = data["content"][0]["text"].strip()
+        logger.info(f"Claude response: {text[:300]}")
+
+        # Clean markdown if present
+        text = re.sub(r"```json|```", "", text).strip()
+        nodes_raw = json.loads(text)
+        return [(n["node_id"].strip().upper(), n["master"].strip()) for n in nodes_raw]
+
+
+# ── Excel helpers ─────────────────────────────────────────────────────────────
 
 def get_or_create_workbook():
     if os.path.exists(EXCEL_FILE):
@@ -25,7 +84,7 @@ def get_or_create_workbook():
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Tracker Log"
-    headers = ["S.No", "Node ID", "Master", "Manual Cmd Angle", "Date Added", "Source Image"]
+    headers = ["S.No", "Node ID", "Master", "Manual Cmd Angle", "Date Added", "Source"]
     thin = Side(style="thin", color="BFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     header_font = Font(name="Arial", bold=True, color="FFFFFF", size=11)
@@ -57,7 +116,7 @@ def get_existing_node_ids(wb):
     return existing
 
 
-def append_nodes(nodes, image_name):
+def append_nodes(nodes, source_name):
     wb = get_or_create_workbook()
     ws = wb["Tracker Log"]
     existing = get_existing_node_ids(wb)
@@ -78,7 +137,7 @@ def append_nodes(nodes, image_name):
             continue
         row_num = ws.max_row + 1
         s_no = row_num - 1
-        row_data = [s_no, node_id_upper, master, "", today, image_name]
+        row_data = [s_no, node_id_upper, master, "", today, source_name]
         for col, val in enumerate(row_data, 1):
             cell = ws.cell(row=row_num, column=col, value=val)
             cell.font = cell_font
@@ -93,61 +152,15 @@ def append_nodes(nodes, image_name):
     return added, skipped
 
 
-# ── OCR & Parsing ────────────────────────────────────────────────────────────
-
-def parse_genius_vision_image(image_bytes):
-    img = Image.open(io.BytesIO(image_bytes))
-    # Upscale for better OCR accuracy
-    w, h = img.size
-    img = img.resize((w * 2, h * 2), Image.LANCZOS)
-    img = img.convert("L")  # grayscale
-
-    text = pytesseract.image_to_string(img, config="--psm 6")
-    logger.info(f"OCR raw text:\n{text[:500]}")
-
-    nodes = []
-    lines = text.splitlines()
-
-    # Pattern: 4-char hex Node ID followed by Master XX on same or next line
-    node_pattern = re.compile(r'\b([0-9A-Fa-f]{4})\b')
-    master_pattern = re.compile(r'[Mm]aster\s*(\d+)')
-
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        node_match = node_pattern.search(line)
-        if node_match:
-            node_id = node_match.group(1).upper()
-            # Look for master on same line or next 2 lines
-            master = None
-            search_text = " ".join(lines[i:i+3])
-            m = master_pattern.search(search_text)
-            if m:
-                master = f"Master {m.group(1)}"
-            if master:
-                nodes.append((node_id, master))
-        i += 1
-
-    # Deduplicate while preserving order
-    seen = set()
-    unique = []
-    for n in nodes:
-        if n[0] not in seen:
-            seen.add(n[0])
-            unique.append(n)
-
-    return unique
-
-
-# ── Bot handlers ─────────────────────────────────────────────────────────────
+# ── Bot handlers ──────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "Tracker Node Bot\n\n"
-        "Send me screenshots from GeniusVision and I will extract Node IDs and Masters into Excel.\n\n"
+        "Send me GeniusVision screenshots and I will extract Node IDs and Masters into Excel.\n\n"
         "Commands:\n"
         "/export — Download the current Excel file\n"
-        "/count  — See total nodes logged\n"
+        "/count  — See total nodes per Master\n"
         "/clear  — Delete all data and start fresh\n"
         "/help   — Show this message"
     )
@@ -155,13 +168,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Processing image, please wait...")
+    await update.message.reply_text("Reading image, please wait...")
     try:
-        photo = update.message.photo[-1]  # highest resolution
+        photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
         image_bytes = await file.download_as_bytearray()
 
-        nodes = parse_genius_vision_image(bytes(image_bytes))
+        nodes = await extract_nodes_with_claude(bytes(image_bytes))
 
         if not nodes:
             await update.message.reply_text(
@@ -170,8 +183,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-        image_name = f"photo_{datetime.now().strftime('%d%m%Y_%H%M%S')}"
-        added, skipped = append_nodes(nodes, image_name)
+        source_name = f"photo_{datetime.now().strftime('%d%m%Y_%H%M%S')}"
+        added, skipped = append_nodes(nodes, source_name)
 
         reply = (
             f"Extracted {len(nodes)} nodes from image.\n"
@@ -182,7 +195,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
 
     except Exception as e:
-        logger.error(f"Error processing image: {e}")
+        logger.error(f"Error: {e}")
         await update.message.reply_text(f"Error processing image: {str(e)}")
 
 
@@ -209,7 +222,6 @@ async def count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wb = get_or_create_workbook()
     ws = wb["Tracker Log"]
     total = ws.max_row - 1
-    # Count per master
     masters = {}
     for row in ws.iter_rows(min_row=2, values_only=True):
         if row[2]:
@@ -231,11 +243,13 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
     if not TOKEN:
         raise ValueError("BOT_TOKEN environment variable not set.")
+    if not ANTHROPIC_KEY:
+        raise ValueError("ANTHROPIC_API_KEY environment variable not set.")
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("export", export))
