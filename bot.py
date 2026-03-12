@@ -14,15 +14,14 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=lo
 logger = logging.getLogger(__name__)
 
 TOKEN = os.environ.get("BOT_TOKEN", "")
-ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
 EXCEL_FILE = "tracker_log.xlsx"
 
-# ── Claude Vision ─────────────────────────────────────────────────────────────
+# ── Gemini Vision ─────────────────────────────────────────────────────────────
 
-async def extract_nodes_with_claude(image_bytes: bytes) -> list:
+async def extract_nodes_with_gemini(image_bytes: bytes) -> list:
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
 
-    # Detect image type
     if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
         media_type = "image/png"
     elif image_bytes[:2] == b'\xff\xd8':
@@ -37,48 +36,39 @@ Extract all rows from the table and return ONLY a JSON array like this:
 Rules:
 - node_id is the 4-character hex value in the Node ID column
 - master is the value in the Master column e.g. "Master 20"
-- Return ONLY the JSON array, no explanation, no markdown"""
+- Return ONLY the JSON array, no explanation, no markdown backticks"""
 
     payload = {
-        "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 2000,
-        "messages": [
+        "contents": [
             {
-                "role": "user",
-                "content": [
+                "parts": [
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
+                        "inline_data": {
+                            "mime_type": media_type,
                             "data": b64
                         }
                     },
                     {
-                        "type": "text",
                         "text": prompt
                     }
                 ]
             }
-        ]
+        ],
+        "generationConfig": {
+            "temperature": 0,
+            "maxOutputTokens": 2000
+        }
     }
 
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+
     async with httpx.AsyncClient(timeout=60) as client:
-        response = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": ANTHROPIC_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json"
-            },
-            json=payload
-        )
+        response = await client.post(url, json=payload)
         response.raise_for_status()
         data = response.json()
-        text = data["content"][0]["text"].strip()
-        logger.info(f"Claude response: {text[:300]}")
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        logger.info(f"Gemini response: {text[:300]}")
 
-        # Clean markdown if present
         text = re.sub(r"```json|```", "", text).strip()
         nodes_raw = json.loads(text)
         return [(n["node_id"].strip().upper(), n["master"].strip()) for n in nodes_raw]
@@ -182,7 +172,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         file = await context.bot.get_file(photo.file_id)
         image_bytes = await file.download_as_bytearray()
 
-        nodes = await extract_nodes_with_claude(bytes(image_bytes))
+        nodes = await extract_nodes_with_gemini(bytes(image_bytes))
 
         if not nodes:
             await update.message.reply_text(
@@ -256,8 +246,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     if not TOKEN:
         raise ValueError("BOT_TOKEN environment variable not set.")
-    if not ANTHROPIC_KEY:
-        raise ValueError("ANTHROPIC_API_KEY environment variable not set.")
+    if not GEMINI_KEY:
+        raise ValueError("GEMINI_API_KEY environment variable not set.")
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("export", export))
