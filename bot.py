@@ -60,7 +60,7 @@ Rules:
         }
     }
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
 
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(url, json=payload)
