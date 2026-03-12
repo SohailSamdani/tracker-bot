@@ -3,12 +3,13 @@ import re
 import json
 import logging
 import httpx
+import asyncio
+import base64
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-import base64
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -60,17 +61,17 @@ Rules:
         }
     }
 
-   url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_KEY}"
 
-import asyncio
-async with httpx.AsyncClient(timeout=60) as client:
-    for attempt in range(3):
-        response = await client.post(url, json=payload)
-        if response.status_code == 429:
-            await asyncio.sleep(10)
-            continue
-        response.raise_for_status()
-        break
+    async with httpx.AsyncClient(timeout=60) as client:
+        for attempt in range(3):
+            response = await client.post(url, json=payload)
+            if response.status_code == 429:
+                await asyncio.sleep(10)
+                continue
+            response.raise_for_status()
+            break
+
         data = response.json()
         text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
         logger.info(f"Gemini response: {text[:300]}")
