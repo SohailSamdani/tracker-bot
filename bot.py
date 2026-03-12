@@ -73,8 +73,17 @@ Rules:
             break
 
         data = response.json()
-        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        logger.info(f"Gemini response: {text[:300]}")
+        logger.info(f"Full Gemini response: {json.dumps(data)[:500]}")
+
+        if "candidates" not in data:
+            raise ValueError(f"Unexpected response: {json.dumps(data)[:300]}")
+
+        candidate = data["candidates"][0]
+        if "content" not in candidate:
+            raise ValueError(f"No content in candidate: {json.dumps(candidate)[:300]}")
+
+        text = candidate["content"]["parts"][0]["text"].strip()
+        logger.info(f"Gemini text: {text[:300]}")
 
         text = re.sub(r"```json|```", "", text).strip()
         nodes_raw = json.loads(text)
