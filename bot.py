@@ -22,6 +22,14 @@ EXCEL_FILE = "tracker_log.xlsx"
 async def extract_nodes_with_claude(image_bytes: bytes) -> list:
     b64 = base64.standard_b64encode(image_bytes).decode("utf-8")
 
+    # Detect image type
+    if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+        media_type = "image/png"
+    elif image_bytes[:2] == b'\xff\xd8':
+        media_type = "image/jpeg"
+    else:
+        media_type = "image/jpeg"
+
     prompt = """This is a screenshot from GeniusVision solar tracker software.
 Extract all rows from the table and return ONLY a JSON array like this:
 [{"node_id": "30C8", "master": "Master 20"}, ...]
@@ -42,7 +50,7 @@ Rules:
                         "type": "image",
                         "source": {
                             "type": "base64",
-                            "media_type": "image/jpeg",
+                            "media_type": media_type,
                             "data": b64
                         }
                     },
